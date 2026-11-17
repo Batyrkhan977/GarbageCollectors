@@ -29,16 +29,18 @@ async def run(url, name):
                     join['resume_token'] = token_path.read_text().strip()
                 await ws.send(json.dumps(join))
                 my_id = None
+                my_uid = None
                 last_tick = -1
                 async for raw in ws:
                     msg = json.loads(raw)
                     if msg.get('type') == 'welcome':
                         my_id = msg['player_id']
+                        my_uid = msg.get('uid')
                         if msg.get('resume_token'):
                             token_path.write_text(msg['resume_token'])
                         print('Joined as', name, 'id', my_id)
                     elif msg.get('type') == 'state' and my_id is not None:
-                        if not msg['running'] or msg['tick'] <= last_tick:
+                        if not msg['running'] or msg['tick'] <= last_tick or (msg.get('mode') == 'time_attack' and msg.get('active_turn') != my_uid):
                             continue
                         last_tick = msg['tick']
                         move = choose_move(msg, my_id)

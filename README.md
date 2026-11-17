@@ -1,90 +1,91 @@
-# Garbage Collectors — Classroom Bot Competition
+# Garbage Collectors — Competition v2
 
-A Python WebSocket server + two browser pages + student bot SDK/example. **Walls never leave the teacher's authenticated admin connection.**
+A classroom WebSocket competition on a 20×20 map. Teacher controls are protected by `ADMIN_PASSWORD`; student messages never contain wall coordinates or map contents.
 
-## Existing Render deployment
+## Deploy to your existing Render service
 
-1. Replace `server.py`, `index.html`, `requirements.txt`, and `render.yaml` in your existing `GarbageCollectors` GitHub repository. Add `admin.html`, `student_bot.py`, and `.gitignore`. Keep `map.txt` (or replace it with the included sample). Commit to `main`.
-2. In **Render → garbage-collectors → Environment**, add an environment variable `ADMIN_PASSWORD` with a **long, unique password** (not in GitHub). Save it; Render should redeploy (or use **Manual Deploy → Deploy latest commit**).
-3. Teacher page: `https://garbage-collectors-aox7.onrender.com/admin`. Student spectator/player page: `https://garbage-collectors-aox7.onrender.com/`.
-4. Teacher signs in, optionally changes settings / 20×20 map, clicks **Start / Resume**. Reset or Save settings starts a new paused round and disconnects old participants.
-5. Students write a bot with the protocol below, each using a **unique bot name**.
+1. Extract this ZIP, then replace the files in your existing GitHub repository with the contents of this folder. Commit to the branch Render deploys.
+2. In Render, set the `ADMIN_PASSWORD` environment variable to a **long, unique password** (if not already set). Keep it private; do not add it to GitHub.
+3. Deploy the latest commit, then visit:
+   - Game and leaderboard: `https://garbage-collectors-aox7.onrender.com/`
+   - Teacher manager: `https://garbage-collectors-aox7.onrender.com/admin`
+   - Student WebSocket: `wss://garbage-collectors-aox7.onrender.com/play`
+   - Public spectator WebSocket: `wss://garbage-collectors-aox7.onrender.com/watch`
+4. Open the manager, sign in, **pause**, choose a mode, edit settings and coordinates, **Save settings and reset round**, let up to four students connect, then **Start**.
 
-**Security:** Serve through Render HTTPS/WSS. Never share `ADMIN_PASSWORD`, and don't put it into a client or a public repository. Anyone who knows the public game endpoint can join as a player; the teacher password only protects management. For a private class, add player access codes later. The admin login page itself is public, but game control requires the manager password.
+The free Render service can sleep and restart. Settings, tokens, results, and scores are **in memory only**, so they are lost on restart.
 
-**Persistence:** Scores, map edits, and settings reside in memory and **reset on Render service restart / sleep**. For long-running competitions, use an always-on service and a database; Render's free tier can sleep when inactive. The file `map.txt` is the durable default map; admin edits are ephemeral.
+## Server controls and limits
 
-## Local start
+- **Tick rate:** integer 1–50 ticks/second.
+- **Maximum garbage:** integer 1–50. The map's initial number of `2` cells must **not exceed** this maximum. To set maximum to 5 with the supplied map (32 initial pieces), edit the map and reduce the number of `2` cells first.
+- **Garbage spawn interval:** 0.2–120 seconds; applies only to FFA and 2v2.
+- **Built-in random bots:** integer 0–4. Each counts against the **four simultaneous player** cap. For four student competitors, set random bots to **0**.
+- **Start positions:** four distinct `[x,y]` pairs on empty `0` cells, each x/y from 0–19. Slot 1 is assigned to player #1, slot 2 to player #2, etc.
+- New entrant gets the **lowest unused number** in 1–4. When a bot disconnects, its number is released immediately; score remains in the leaderboard as an offline entry. A reconnect token permits reclaiming its prior record, with whatever number is now available. The server also defensively repairs duplicate active player numbers.
+- Saving settings and resetting closes all player connections, clears all scores, and starts a fresh paused round; students reconnect. Joining is only allowed **before the round starts**.
 
-```bash
-pip install -r requirements.txt
-export ADMIN_PASSWORD='choose-a-long-secret'    # PowerShell: $env:ADMIN_PASSWORD='choose-a-long-secret'
-python server.py
-```
+## Game modes
 
-Open `http://localhost:8765/` and `http://localhost:8765/admin`. The browser client uses `ws://` locally and `wss://` on Render. Do not expose unencrypted local admin logins on the internet.
+### Free for All (`ffa`)
+All connected players compete concurrently. Every participant's collected garbage counts individually. At the manager-configured **duration_seconds**, the game stops and scores freeze. Winner is the greatest score, with lower idle-tick count as tiebreaker. Garbage can respawn until the configured cap.
 
-## Student WebSocket protocol
+### 2v2 (`2v2`)
+**Exactly four players** must connect before start. Slots **1 and 3 are red**, **2 and 4 are blue**. Every player's garbage goes toward their team's total. Highest team total after the configured round duration wins; equal totals are a draw. Individual scores and idle ticks remain visible. Garbage respawns as in FFA.
 
-Endpoint: `wss://garbage-collectors-aox7.onrender.com/play`.
+### Time Attack (`time_attack`)
+Connected players are randomly ordered when the manager starts. Players **take turns**, never move concurrently. At each turn, garbage resets to the same original `2` cells, the player starts at the configured position for their slot, and **no garbage respawns**. When the player collects every piece, `finish_ticks` records elapsed ticks for that turn. Ranking sorts completed runs from shortest to longest; unfinished or skipped runs follow. Run time in seconds is `finish_ticks / ticks_per_second`. It has **no fixed time limit**; the manager may click **Skip current Time Attack run** for a stuck bot. A disconnected active bot is automatically marked disconnected and skipped. Fairness note: starting positions may differ by player slot; for a strict benchmarking event, use layouts with comparably difficult starting cells.
 
-On opening the WebSocket, send within 10 seconds:
+## WebSocket protocol
 
-```json
-{"type":"join","role":"bot","name":"AliceBot"}
-```
-
-Bot names must be unique (case-insensitive), 1–24 characters. The server responds:
-
-```json
-{"type":"welcome","player_id":1,"name":"AliceBot","resume_token":"SECRET_TOKEN","width":20,"height":20,"tick_ms":200}
-```
-
-Store your **private** `resume_token` locally. To rejoin the same round without losing your score, send:
+Students may code bots in **any language** supporting WebSockets (e.g. Python, JavaScript, Java, C++). The client must send:
 
 ```json
-{"type":"join","role":"bot","name":"AliceBot","resume_token":"SECRET_TOKEN"}
+{"type":"join","role":"bot","name":"MyRobot"}
 ```
 
-During a running game, the server broadcasts a `state` message every tick:
+On success the server replies:
 
 ```json
-{
-  "type":"state", "tick":42, "running":true, "tick_ms":200,
-  "width":20, "height":20,
-  "players":[{"id":1,"name":"AliceBot","x":5,"y":9,"score":4,"idle_ticks":2,"is_bot":true,"kind":"student","connected":true}],
-  "leaderboard":[{"id":1,"name":"AliceBot","score":4,"idle_ticks":2,"kind":"student","connected":true}],
-  "garbage":[[3,8],[11,5]], "remaining":2
-}
+{"type":"welcome","player_id":1,"uid":"unique-entrant-id","name":"MyRobot","resume_token":"PRIVATE-SECRET","width":20,"height":20,"tick_ms":200}
 ```
 
-**No `walls` field is sent**. Garbage is broadcast globally. Coordinates use `(x,y)`, with `(0,0)` at top left, x increasing to the right, y downward.
+Save the `resume_token` privately to reconnect to an idle round without losing your bot's score. Do **not** publish it. Another player may take your old number while you are disconnected; read the new `player_id` from `welcome`.
 
-Send one move for each upcoming tick:
+Server broadcasts a `state` message with `tick`, `running`, `finished`, `mode`, `players` (positions and scores), `garbage` (coordinates), `leaderboard`, `teams`, `remaining_seconds`, and Time Attack fields `active_turn`, `trial_ticks`, and `turn_order`. **There is no wall list or map in public state.**
+
+Each game tick, bot can send a movement intention:
 
 ```json
 {"type":"move","direction":"right"}
 ```
 
-Directions: `up`, `down`, `left`, `right`, `none`. You can send multiple moves in a tick, but only the most recent counts. A move received too late may apply to the following tick. After the server advances, it sends the updated state.
+Allowed directions: `up`, `down`, `left`, `right`, `none`. The server processes the latest received move on its next tick. Sending no direction, or explicitly sending `none`, counts as an idle tick. A directional move blocked by a wall, another player, or a boundary **does not count as idle**. In Time Attack, only the player with `uid == active_turn` can move; other bots should refrain from sending moves until their turn.
 
-`idle_ticks` increments when a player sends `none` **or sends no move** for that tick. A directional move attempting to enter a wall, boundary, or occupied square is **not** counted idle. The random built-in bots always attempt a direction. Disconnected student bots remain visible on the leaderboard but do not accumulate idle ticks during disconnection.
-
-Students **must not** send `ADMIN_PASSWORD` or connect to `/admin-ws`.
-
-## Classroom competition rules
-
-- Teacher can start, pause, reset and update map, tick rate (1–20/s), garbage spawning frequency (0.2–120s), garbage limit (1–300), and built-in random bot count (0–10).
-- Teacher's manager page `/admin` shows the entire map; students' main page `/` and `/watch` receive no walls.
-- Map file is exactly 20 rows of 20 characters: `0` empty, `1` wall, `2` initial garbage. Teacher may edit map in their dashboard when paused. Saving settings **resets the round**.
-- Random bots are competitors with names `Random Bot 1` and `Random Bot 2`; student bots are identified by their unique names.
-- Leaderboard sorts by garbage collected descending, then fewer idle ticks (tie breaker). Scores remain after student disconnects and reset for a new round.
-- Each tick resolves movement in rotating priority order to reduce first-player advantage. No two players share a cell. Garbage appears at an empty floor cell once per configured interval when below the cap.
-
-## Start an example student bot
+Use `student_bot.py` as a minimal Python template. Run:
 
 ```bash
-python student_bot.py wss://garbage-collectors-aox7.onrender.com/play "My First Bot"
+pip install -r requirements.txt
+python student_bot.py wss://garbage-collectors-aox7.onrender.com/play MyRobot
 ```
 
-Edit `choose_move(state, my_id)` in `student_bot.py` to implement intelligent map exploration and collection. It begins with random movement. Python requires the dependency in `requirements.txt`; students can also implement the same JSON messages in JavaScript or another WebSocket-capable language. The bot's reconnect token is stored in a local file which `.gitignore` excludes from commits. A new round invalidates old tokens and the example bot automatically retries with a fresh identity.
+## Map editor preview
+
+Manager's **live** board overlays all currently visible players and current garbage on top of walls. Clicking **Preview map** uses the edited wall layout and current players; if the map text has changed, starting garbage is taken from its `2` characters instead of the old live garbage set. Start slot markers are displayed when a new round is paused, even if a slot has not yet been occupied.
+
+Map text: 20 lines of 20 characters, `0` = floor, `1` = wall, `2` = initial garbage. Edit and save only when paused. Initial positions must be on `0` cells.
+
+## Tests
+
+```bash
+python -m unittest -v test_competition
+```
+
+Tests cover 1–50 settings, unique IDs, reconnection, four-player capacity, idle-count semantics, timed FFA, 2v2, and Time Attack resets.
+
+## Notes
+
+- A student bot can see player positions and public garbage coordinates, but never wall data. Inferred walls are the student's responsibility.
+- Browser spectators connect through `/watch`; the web game page also offers interactive manual play.
+- The authenticated `/admin-ws` route requires the teacher's password; public clients cannot issue control commands.
+- The service does not yet provide durable historical results or fairness protections against malicious bot traffic, so use it with a trusted classroom group.
