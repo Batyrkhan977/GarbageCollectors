@@ -154,3 +154,51 @@ class CompetitionTests(unittest.TestCase):
 
 
 if __name__=='__main__':unittest.main()
+
+class RectangularMapTests(unittest.TestCase):
+    def test_rectangular_dimensions_and_hidden_walls(self):
+        from server import validate_map
+        from tempfile import TemporaryDirectory
+        with TemporaryDirectory() as d:
+            fp = Path(d) / 'map.txt'
+            fp.write_text('\n'.join(['0'*8 for _ in range(5)]))
+            g=Competition(fp)
+            spawns=[[0,0],[7,0],[0,4],[7,4]]
+            g.configure({'map':fp.read_text(), 'start_positions':spawns, 'random_bots':0})
+            self.assertEqual((g.width,g.height),(8,5))
+            p=g.join(object(),{'name':'TestBot','role':'bot'})
+            self.assertEqual((p.x,p.y),(0,0))
+            s=g.public_state()
+            self.assertEqual((s['width'],s['height']),(8,5))
+            self.assertNotIn('map', s)
+            self.assertNotIn('walls', s)
+            with self.assertRaises(ValueError):validate_map('0000\n'*5)
+            with self.assertRaises(ValueError):validate_map('0'*21+'\n'+'0'*21+'\n')
+
+    def test_bots_pass_through_and_share_same_cell(self):
+        from tempfile import TemporaryDirectory
+        with TemporaryDirectory() as d:
+            fp = Path(d) / 'map.txt'
+            fp.write_text('\n'.join(['0'*6 for _ in range(5)]))
+            g=Competition(fp)
+            g.configure({'map':fp.read_text(), 'start_positions':[[0,0],[1,0],[0,4],[5,4]],
+                         'random_bots':0})
+            a=g.join(object(),{'role':'bot','name':'Alpha'})
+            b=g.join(object(),{'role':'bot','name':'Beta'})
+            g.start()
+            a.pending='right';b.pending='none';g.advance()
+            self.assertEqual((a.x,a.y),(1,0))
+            self.assertEqual((b.x,b.y),(1,0))
+            a.pending='none';b.pending='left';g.advance()
+            self.assertEqual((b.x,b.y),(0,0))
+            self.assertEqual(a.idle_ticks,1)
+            self.assertEqual(b.idle_ticks,1)
+
+    def test_small_map_spawn_rejection(self):
+        from tempfile import TemporaryDirectory
+        with TemporaryDirectory() as d:
+            fp = Path(d)/'map.txt'
+            fp.write_text('\n'.join(['0'*5 for _ in range(5)]))
+            g=Competition(fp)
+            with self.assertRaises(ValueError):
+                g.configure({'map':fp.read_text(),'start_positions':[[1,1],[4,1],[1,18],[4,4]], 'random_bots':0})

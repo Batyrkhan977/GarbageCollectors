@@ -20,7 +20,6 @@ from typing import Any
 from websockets.asyncio.server import serve
 from websockets.exceptions import ConnectionClosed
 
-W = H = 20
 MAX_PLAYERS = 4
 # Twenty recognizable colors, chosen for visibility on the dark game board.
 PLAYER_COLORS = (
@@ -51,9 +50,15 @@ LOG = logging.getLogger('garbage_collectors')
 
 
 def validate_map(text):
+    if not isinstance(text, str):
+        raise ValueError('Map must be text')
     rows = text.strip().splitlines()
-    if len(rows) != H or any(len(row) != W or any(c not in '012' for c in row) for row in rows):
-        raise ValueError('Map must contain exactly 20 lines of 20 characters (0=floor, 1=wall, 2=garbage)')
+    height = len(rows)
+    width = len(rows[0]) if rows else 0
+    if not (5 <= width <= 20 and 5 <= height <= 20) or any(
+        len(row) != width or any(c not in '012' for c in row) for row in rows
+    ):
+        raise ValueError('Map must be a rectangle of 5–20 rows and 5–20 columns, using only 0, 1, 2')
     walls = {(x, y) for y, row in enumerate(rows) for x, char in enumerate(row) if char == '1'}
     garbage = {(x, y) for y, row in enumerate(rows) for x, char in enumerate(row) if char == '2'}
     return '\n'.join(rows), walls, garbage
@@ -87,14 +92,15 @@ class Competition:
     def __init__(self, map_path):
         self.rng = random.Random()
         self.map_text, self.walls, self.initial_garbage = validate_map(Path(map_path).read_text(encoding='utf-8'))
+        self.width, self.height = self._size(self.map_text)
         self.tps = 5
         self.spawn_seconds = 2.0
         self.max_garbage = 32
         self.random_bots = 2
         self.mode = 'ffa'
         self.duration_seconds = 120
-        self.start_positions = [(1, 1), (18, 1), (1, 18), (18, 18)]
-        self._validate_positions(self.start_positions, self.walls, self.initial_garbage)
+        self.start_positions = self._default_spawns()
+        self._validate_positions(self.start_positions, self.walls, self.initial_garbage, self.width, self.height)
         self.garbage = set(self.initial_garbage)
         self.running = False
         self.finished = False
@@ -111,8 +117,26 @@ class Competition:
         self._create_random_bots()
         self._allocate_start_positions()
 
+    def _default_spawns(self):
+        w, h = self.width, self.height
+        suggested = [(1, 1), (w-2, 1), (1, h-2), (w-2, h-2)]
+        floor = [(x,y) for y in range(h) for x in range(w)
+                 if (x,y) not in self.walls and (x,y) not in self.initial_garbage]
+        found = []
+        for p in suggested + floor:
+            if p in floor and p not in found:
+                found.append(p)
+                if len(found) == MAX_PLAYERS:
+                    return found
+        raise ValueError('Map needs at least four free cells for player spawns')
+
     @staticmethod
-    def _validate_positions(positions, walls, garbage):
+    def _size(map_text):
+        lines = map_text.splitlines()
+        return len(lines[0]), len(lines)
+
+    @staticmethod
+    def _validate_positions(positions, walls, garbage, width, height):
         if not isinstance(positions, list) or len(positions) != MAX_PLAYERS:
             raise ValueError('Provide exactly four initial positions [[x,y], ...]')
         cells = []
@@ -121,8 +145,8 @@ class Competition:
                 any(isinstance(a, bool) or not isinstance(a, int) for a in value)):
                 raise ValueError('Starting coordinates must be integer [x,y] pairs')
             x, y = value
-            if not 0 <= x < W or not 0 <= y < H:
-                raise ValueError('Starting coordinates must be between 0 and 19')
+            if not 0 <= x < width or not 0 <= y < height:
+                raise ValueError(f'Starting coordinates must be within 0–{width-1} and 0–{height-1}')
             if (x,y) in walls or (x,y) in garbage:
                 raise ValueError(f'Initial position ({x},{y}) must be empty floor')
             cells.append((x,y))
@@ -310,7 +334,6 @@ class Competition:
             if movers:
                 offset = self.tick % len(movers)
                 movers = movers[offset:] + movers[:offset]
-        occupied = {(p.x,p.y) for p in movers}
         for p in movers:
             direction = self.rng.choice(['up','down','left','right']) if p.kind == 'random' else p.pending
             p.pending = 'none'
@@ -320,10 +343,8 @@ class Competition:
             dx,dy = DIRS[direction]
             nx,ny = p.x+dx,p.y+dy
             dest = (nx,ny)
-            if not 0<=nx<W or not 0<=ny<H or dest in self.walls or dest in occupied:
+            if not 0<=nx<self.width or not 0<=ny<self.height or dest in self.walls:
                 continue
-            occupied.discard((p.x,p.y))
-            occupied.add(dest)
             p.x,p.y = dest
             if dest in self.garbage:
                 self.garbage.remove(dest)
@@ -342,7 +363,7 @@ class Competition:
             self.spawn_count += 1
             if len(self.garbage) < self.max_garbage:
                 occupied = {(p.x, p.y) for p in self._active()}
-                candidates = [(x, y) for y in range(H) for x in range(W)
+                candidates = [(x, y) for y in range(self.height) for x in range(self.width)
                               if (x, y) not in self.walls and (x, y) not in self.garbage
                               and (x, y) not in occupied]
                 if candidates:
@@ -364,7 +385,7 @@ class Competition:
                 'running':self.running,'finished':self.finished,'mode':self.mode,
                 'duration_seconds':self.duration_seconds,
                 'remaining_seconds':max(0, round(self.duration_seconds-self.tick/self.tps, 2)) if self.mode!='time_attack' else None,
-                'width':W,'height':H,'teams':teams,
+                'width':self.width,'height':self.height,'teams':teams,
                 'turn_order':[{'name':self.participants[uid].name,'uid':uid} for uid in self.turn_order],
                 'active_turn':self.current_uid if self.mode=='time_attack' and not self.finished else None,
                 'trial_ticks':self.trial_ticks,
@@ -410,7 +431,7 @@ class Competition:
         if not isinstance(raw_map,str):
             raise ValueError('Invalid map text')
         map_text,walls,garbage = validate_map(raw_map)
-        self._validate_positions(positions,walls,garbage)
+        self._validate_positions(positions,walls,garbage,*self._size(map_text))
         if len(garbage)>cap:
             raise ValueError('Map has more starting garbage than the maximum allowed')
         if mode=='time_attack' and not garbage:
@@ -418,6 +439,7 @@ class Competition:
         if mode=='2v2' and bots>4:
             raise ValueError('2v2 allows four total players')
         self.map_text,self.walls,self.initial_garbage=map_text,walls,garbage
+        self.width,self.height=self._size(map_text)
         self.start_positions=[tuple(pos) for pos in positions]
         self.tps,self.max_garbage,self.spawn_seconds=tps,cap,float(spawn)
         self.random_bots,self.duration_seconds,self.mode=bots,duration,mode
@@ -541,7 +563,7 @@ async def main():
             playing.add(ws)
             await ws.send(json.dumps({'type':'welcome','player_id':p.id,'uid':p.uid,
                         'name':p.name,'resume_token':p.token if p.kind=='student' else None,
-                        'width':W,'height':H,'tick_ms':round(1000/game.tps)}))
+                        'width':self.width,'height':self.height,'tick_ms':round(1000/game.tps)}))
             await sync()
             async for raw in ws:
                 try:

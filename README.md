@@ -1,6 +1,6 @@
 # Garbage Collectors — Competition v3
 
-A classroom WebSocket competition on a 20×20 map. Teacher controls are protected by `ADMIN_PASSWORD`; student messages never contain wall coordinates or map contents.
+A classroom WebSocket competition on a 5–20 by 5–20 map. Teacher controls are protected by `ADMIN_PASSWORD`; student messages never contain wall coordinates or map contents.
 
 ## Deploy to your existing Render service
 
@@ -96,3 +96,37 @@ Tests cover 1–50 settings, unique IDs, reconnection, four-player capacity, idl
 - Every connected participant is assigned a random distinct color from a palette of 20. FFA and Time Attack use it for the board and name in both leaderboards. 2v2 overrides it with team red/blue. Colors stay consistent across the round and when resuming the same bot.
 - Active players appear as `Name (Player 1)` through `Name (Player 4)`; disconnected entries with retained results appear as `Name (Former Player 1)` because their released slot can be reused by another player.
 - `color` is available in the public `players` and `leaderboard` objects, and `last_id` is available in the leaderboard. Student protocols remain backward compatible.
+
+
+## v4: Resizable boards, random generator, paint brushes, overlapping bots
+
+The teacher can now independently select **Width** and **Height** (5–20 cells each).
+In `/admin`, click **Generate random board** to create a connected, playable
+layout with four distinct starting squares and randomized initial garbage.
+The number of garbage cells generated will not exceed **Maximum garbage**.
+**Resize board** changes the dimensions of the current editor map.
+
+The **brush palette** includes Wall, Free, Garbage, and Spawn 1–4.
+Tap or drag directly on the teacher map to paint. A spawn brush moves its
+numbered player's starting cell, leaving the previous cell as it was (usually
+empty). You cannot turn an occupied spawn into a wall or garbage without
+first moving that spawn. The editor shows an outline `S1`–`S4` for spawn cells.
+The board supports independent width and height, so 5×20 and 20×5 are valid.
+Editing affects only the local preview until **Save settings and reset round**;
+saving disconnects all students and resets the game. Spawn positions must be
+unique empty cells, and the initial garbage count cannot exceed its maximum.
+
+**Player collision change:** multiple bots may occupy the same cell, cross
+through one another, or swap places. A player move is blocked only by the map
+boundary or a wall. The browser and manager board show overlapping participants
+as smaller separate numbered circles.
+
+**Student bot protocol:** the `welcome` and `state` messages contain `width`
+and `height` for rectangular boards, but never disclose walls. Bot authors
+should read these values instead of assuming a 20×20 map. The garbage list
+remains visible. Inference about walls is easier now that other bots do not
+block movement.
+
+**Hosting note:** Render's free instances may sleep, clearing in-memory game
+state and unsaved custom maps. Save custom map configurations externally if
+persistence between server restarts is required.
