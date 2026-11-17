@@ -8,6 +8,7 @@ import asyncio
 import hmac
 import json
 import logging
+import math
 import os
 import random
 import secrets
@@ -21,6 +22,29 @@ from websockets.exceptions import ConnectionClosed
 
 W = H = 20
 MAX_PLAYERS = 4
+# Twenty recognizable colors, chosen for visibility on the dark game board.
+PLAYER_COLORS = (
+    '#ff6b6b',  # red
+    '#ff983f',  # orange
+    '#ffd166',  # yellow
+    '#80ed99',  # green
+    '#31d6bf',  # turquoise
+    '#55c7ff',  # sky blue
+    '#668cff',  # blue
+    '#ac87ff',  # purple
+    '#ff80d5',  # pink
+    '#f5b971',  # amber
+    '#b7df5b',  # lime
+    '#33bfa8',  # teal
+    '#8dc6ff',  # light blue
+    '#d997ff',  # lavender
+    '#ff9db0',  # rose
+    '#c8e4a5',  # olive
+    '#ff8c78',  # coral
+    '#7baaff',  # cornflower
+    '#e9a8ff',  # lilac
+    '#ddd2bc',  # beige
+)
 DIRS = {'up': (0, -1), 'down': (0, 1), 'left': (-1, 0), 'right': (1, 0), 'none': (0, 0)}
 BASE = Path(__file__).resolve().parent
 LOG = logging.getLogger('garbage_collectors')
@@ -53,6 +77,8 @@ class Participant:
     token: str = ''
     connected: bool = False
     team: str | None = None
+    color: str = ''
+    last_id: int | None = None
     finish_ticks: int | None = None
     trial_status: str = 'waiting'
 
@@ -74,6 +100,7 @@ class Competition:
         self.finished = False
         self.tick = 0
         self.spawn_elapsed = 0.0
+        self.spawn_count = 0
         self.participants: dict[str, Participant] = {}
         self.connections: dict[Any, str] = {}
         self.viewers: set[Any] = set()
@@ -112,14 +139,23 @@ class Competition:
                 return number
         raise ValueError('Game is full: only four players can connect')
 
+    def _choose_color(self):
+        """Random distinct colors for simultaneously active entries where possible."""
+        taken = {p.color for p in self.participants.values() if p.connected and p.color}
+        available = [c for c in PLAYER_COLORS if c not in taken]
+        return self.rng.choice(available or PLAYER_COLORS)
+
     def _create_random_bots(self):
         for n in range(self.random_bots):
             bot = Participant(None, f'Random Bot {n+1}', uuid.uuid4().hex, kind='random', connected=True)
             bot.id = self._unused_id()
+            bot.last_id = bot.id
+            bot.color = self._choose_color()
             self.participants[bot.uid] = bot
 
     def _allocate_start_positions(self):
         for p in self._active():
+            p.last_id = p.id
             p.x, p.y = self.start_positions[p.id-1]
 
     def _sanitize_ids(self):
@@ -129,6 +165,7 @@ class Competition:
             if p.id not in range(1,5) or p.id in seen:
                 p.id = next(i for i in range(1,5) if i not in seen)
             seen.add(p.id)
+            p.last_id = p.id
 
     def join(self, ws, msg):
         if self.running or self.finished or self.tick > 0 or self.turn_order:
@@ -147,6 +184,7 @@ class Competition:
                     if p.connected or p.name != name:
                         raise ValueError('Token belongs to an active or differently named bot')
                     p.id = self._unused_id()
+                    p.last_id = p.id
                     p.connected = True
                     p.pending = 'none'
                     p.x, p.y = self.start_positions[p.id-1]
@@ -159,6 +197,8 @@ class Competition:
         p = Participant(pid, name, uuid.uuid4().hex, kind='student' if role == 'bot' else 'human',
                         token=secrets.token_urlsafe(32) if role == 'bot' else '', connected=True)
         p.x, p.y = self.start_positions[pid-1]
+        p.last_id = pid
+        p.color = self._choose_color()
         self.participants[p.uid] = p
         self.connections[ws] = p.uid
         return p
@@ -170,6 +210,7 @@ class Competition:
             p.connected = False
             p.pending = 'none'
             p.x = p.y = -1
+            p.last_id = p.id
             p.id = None  # Released immediately; next participant receives least unused ID.
             if self.mode == 'time_attack' and self.running and uid == self.current_uid:
                 p.trial_status = 'disconnected'
@@ -188,6 +229,7 @@ class Competition:
         self.finished = False
         self.tick = 0
         self.spawn_elapsed = 0.0
+        self.spawn_count = 0
         self.garbage = set(self.initial_garbage)
         self.participants.clear()
         self.connections.clear()
@@ -217,12 +259,14 @@ class Competition:
                 # Stable and unambiguous: slots 1+3 red, 2+4 blue.
                 for p in roster:
                     p.team = 'red' if p.id % 2 else 'blue'
+                    p.color = '#ff6b6b' if p.team == 'red' else '#668cff'
         self.running = True
 
     def _begin_trial(self):
         self.garbage = set(self.initial_garbage)
         self.trial_ticks = 0
         self.spawn_elapsed = 0
+        self.spawn_count = 0
         for p in self.participants.values():
             p.x = p.y = -1
             p.pending = 'none'
@@ -291,14 +335,16 @@ class Competition:
                 p.trial_status = 'finished'
                 self._next_trial()
             return
-        self.spawn_elapsed += 1/self.tps
-        if self.spawn_elapsed + 1e-9 >= self.spawn_seconds:
-            self.spawn_elapsed %= self.spawn_seconds
+        # An integer tick deadline is the single source of truth. Crossing one
+        # spawn interval schedules exactly ONE new garbage piece (never two).
+        # ceil avoids spawning early when the interval isn't a whole tick.
+        if self.tick >= math.ceil((self.spawn_count + 1) * self.spawn_seconds * self.tps):
+            self.spawn_count += 1
             if len(self.garbage) < self.max_garbage:
-                occupied = {(p.x,p.y) for p in self._active()}
-                candidates = [(x,y) for y in range(H) for x in range(W)
-                              if (x,y) not in self.walls and (x,y) not in self.garbage
-                              and (x,y) not in occupied]
+                occupied = {(p.x, p.y) for p in self._active()}
+                candidates = [(x, y) for y in range(H) for x in range(W)
+                              if (x, y) not in self.walls and (x, y) not in self.garbage
+                              and (x, y) not in occupied]
                 if candidates:
                     self.garbage.add(self.rng.choice(candidates))
         if self.tick >= self.duration_seconds * self.tps:
@@ -324,11 +370,11 @@ class Competition:
                 'trial_ticks':self.trial_ticks,
                 'players':[{'id':p.id,'uid':p.uid,'name':p.name,'x':p.x,'y':p.y,
                             'score':p.score,'idle_ticks':p.idle_ticks,'kind':p.kind,
-                            'is_bot':p.kind!='human','connected':p.connected,'team':p.team}
+                            'is_bot':p.kind!='human','connected':p.connected,'team':p.team,'color':p.color}
                            for p in roster],
                 'leaderboard':[{'id':p.id,'uid':p.uid,'name':p.name,'score':p.score,
                                 'idle_ticks':p.idle_ticks,'kind':p.kind,'connected':p.connected,
-                                'team':p.team,'finish_ticks':p.finish_ticks,'trial_status':p.trial_status}
+                                'team':p.team,'color':p.color,'last_id':p.last_id,'finish_ticks':p.finish_ticks,'trial_status':p.trial_status}
                                for p in ranking],
                 'garbage':[list(c) for c in sorted(self.garbage)],'remaining':len(self.garbage)}
 

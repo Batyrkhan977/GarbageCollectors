@@ -1,4 +1,4 @@
-# Garbage Collectors — Competition v2
+# Garbage Collectors — Competition v3
 
 A classroom WebSocket competition on a 20×20 map. Teacher controls are protected by `ADMIN_PASSWORD`; student messages never contain wall coordinates or map contents.
 
@@ -89,3 +89,10 @@ Tests cover 1–50 settings, unique IDs, reconnection, four-player capacity, idl
 - Browser spectators connect through `/watch`; the web game page also offers interactive manual play.
 - The authenticated `/admin-ws` route requires the teacher's password; public clients cannot issue control commands.
 - The service does not yet provide durable historical results or fairness protections against malicious bot traffic, so use it with a trusted classroom group.
+
+## v3: spawn fix and player colors
+
+- FFA and 2v2 now use a single integer tick deadline for spawning; at most **one** piece is added per configured interval, and the maximum garbage count is enforced. Time Attack still disables spawning. Note that collection and spawn may happen in the same tick: the total can remain unchanged while the original garbage is replaced elsewhere.
+- Every connected participant is assigned a random distinct color from a palette of 20. FFA and Time Attack use it for the board and name in both leaderboards. 2v2 overrides it with team red/blue. Colors stay consistent across the round and when resuming the same bot.
+- Active players appear as `Name (Player 1)` through `Name (Player 4)`; disconnected entries with retained results appear as `Name (Former Player 1)` because their released slot can be reused by another player.
+- `color` is available in the public `players` and `leaderboard` objects, and `last_id` is available in the leaderboard. Student protocols remain backward compatible.
