@@ -1,109 +1,90 @@
-# Garbage Collectors
+# Garbage Collectors — Classroom Bot Competition
 
-A small multiplayer game server built with Python `asyncio` and WebSockets. The server is authoritative: clients request moves, but only the server updates positions, checks walls, awards points, and removes collected garbage.
+A Python WebSocket server + two browser pages + student bot SDK/example. **Walls never leave the teacher's authenticated admin connection.**
 
-## Quick start
+## Existing Render deployment
 
-Requires Python 3.10+.
+1. Replace `server.py`, `index.html`, `requirements.txt`, and `render.yaml` in your existing `GarbageCollectors` GitHub repository. Add `admin.html`, `student_bot.py`, and `.gitignore`. Keep `map.txt` (or replace it with the included sample). Commit to `main`.
+2. In **Render → garbage-collectors → Environment**, add an environment variable `ADMIN_PASSWORD` with a **long, unique password** (not in GitHub). Save it; Render should redeploy (or use **Manual Deploy → Deploy latest commit**).
+3. Teacher page: `https://garbage-collectors-aox7.onrender.com/admin`. Student spectator/player page: `https://garbage-collectors-aox7.onrender.com/`.
+4. Teacher signs in, optionally changes settings / 20×20 map, clicks **Start / Resume**. Reset or Save settings starts a new paused round and disconnects old participants.
+5. Students write a bot with the protocol below, each using a **unique bot name**.
+
+**Security:** Serve through Render HTTPS/WSS. Never share `ADMIN_PASSWORD`, and don't put it into a client or a public repository. Anyone who knows the public game endpoint can join as a player; the teacher password only protects management. For a private class, add player access codes later. The admin login page itself is public, but game control requires the manager password.
+
+**Persistence:** Scores, map edits, and settings reside in memory and **reset on Render service restart / sleep**. For long-running competitions, use an always-on service and a database; Render's free tier can sleep when inactive. The file `map.txt` is the durable default map; admin edits are ephemeral.
+
+## Local start
 
 ```bash
 pip install -r requirements.txt
+export ADMIN_PASSWORD='choose-a-long-secret'    # PowerShell: $env:ADMIN_PASSWORD='choose-a-long-secret'
 python server.py
 ```
 
-The terminal displays the 20×20 map using `#` (wall), `G` (garbage), `.` (empty tile), and digits (players). The default server address is `ws://0.0.0.0:8765` (**bind address**, not a destination to type on other devices).
+Open `http://localhost:8765/` and `http://localhost:8765/admin`. The browser client uses `ws://` locally and `wss://` on Render. Do not expose unencrypted local admin logins on the internet.
 
-For another device on the same Wi-Fi network, connect to `ws://SERVER_LOCAL_IP:8765`, replacing `SERVER_LOCAL_IP` with the host computer's LAN IPv4 address. If connections fail, check the host firewall. This prototype uses unencrypted `ws://` and has no authentication; use it on a trusted local network, not directly exposed to the public internet.
+## Student WebSocket protocol
 
-Test connection (from the server machine or another device):
+Endpoint: `wss://garbage-collectors-aox7.onrender.com/play`.
 
-```bash
-python test_client.py ws://localhost:8765
-```
-
-Use `w`, `a`, `s`, `d` plus Enter in the example client. This is a basic testing client, *not* a graphical interface and not a precise 5 Hz input controller.
-
-Run a different map or port:
-
-```bash
-python server.py --map my_map.txt --port 9000
-```
-
-## Map format
-
-`map.txt` is exactly **20 lines**, each exactly **20 characters**, with no spaces:
-
-- `0`: empty floor
-- `1`: impassable wall
-- `2`: garbage to collect
-
-Coordinates are zero-indexed: `(x=0, y=0)` is the top-left corner; x increases right, y increases down. A player spawns at a random empty (`0`) tile, never on garbage, a wall, or another player.
-
-## WebSocket protocol (JSON)
-
-Client connects to `ws://HOST:8765`.
-
-**Server → newly connected client** (`welcome`, once):
+On opening the WebSocket, send within 10 seconds:
 
 ```json
-{"type":"welcome","player_id":1,"width":20,"height":20,"tick_ms":200}
+{"type":"join","role":"bot","name":"AliceBot"}
 ```
 
-**The server never sends wall coordinates.** Clients discover blocked map cells by comparing requested moves with their actual positions in subsequent state messages.
+Bot names must be unique (case-insensitive), 1–24 characters. The server responds:
 
-**Client → server** (at most one movement intent per tick recommended):
+```json
+{"type":"welcome","player_id":1,"name":"AliceBot","resume_token":"SECRET_TOKEN","width":20,"height":20,"tick_ms":200}
+```
+
+Store your **private** `resume_token` locally. To rejoin the same round without losing your score, send:
+
+```json
+{"type":"join","role":"bot","name":"AliceBot","resume_token":"SECRET_TOKEN"}
+```
+
+During a running game, the server broadcasts a `state` message every tick:
+
+```json
+{
+  "type":"state", "tick":42, "running":true, "tick_ms":200,
+  "width":20, "height":20,
+  "players":[{"id":1,"name":"AliceBot","x":5,"y":9,"score":4,"idle_ticks":2,"is_bot":true,"kind":"student","connected":true}],
+  "leaderboard":[{"id":1,"name":"AliceBot","score":4,"idle_ticks":2,"kind":"student","connected":true}],
+  "garbage":[[3,8],[11,5]], "remaining":2
+}
+```
+
+**No `walls` field is sent**. Garbage is broadcast globally. Coordinates use `(x,y)`, with `(0,0)` at top left, x increasing to the right, y downward.
+
+Send one move for each upcoming tick:
 
 ```json
 {"type":"move","direction":"right"}
 ```
 
-Valid directions: `up`, `down`, `left`, `right`, `none`. If multiple messages arrive before the next tick, **only the latest** is applied. If none arrive, the player stays still. Messages are intents, never absolute positions.
+Directions: `up`, `down`, `left`, `right`, `none`. You can send multiple moves in a tick, but only the most recent counts. A move received too late may apply to the following tick. After the server advances, it sends the updated state.
 
-**Server → all clients every 200 milliseconds** (`state`):
+`idle_ticks` increments when a player sends `none` **or sends no move** for that tick. A directional move attempting to enter a wall, boundary, or occupied square is **not** counted idle. The random built-in bots always attempt a direction. Disconnected student bots remain visible on the leaderboard but do not accumulate idle ticks during disconnection.
 
-```json
-{
-  "type":"state",
-  "tick":35,
-  "players":[{"id":1,"x":8,"y":7,"score":3},{"id":2,"x":12,"y":9,"score":1}],
-  "garbage":[[3,4],[10,11]],
-  "remaining":2
-}
+Students **must not** send `ADMIN_PASSWORD` or connect to `/admin-ws`.
+
+## Classroom competition rules
+
+- Teacher can start, pause, reset and update map, tick rate (1–20/s), garbage spawning frequency (0.2–120s), garbage limit (1–300), and built-in random bot count (0–10).
+- Teacher's manager page `/admin` shows the entire map; students' main page `/` and `/watch` receive no walls.
+- Map file is exactly 20 rows of 20 characters: `0` empty, `1` wall, `2` initial garbage. Teacher may edit map in their dashboard when paused. Saving settings **resets the round**.
+- Random bots are competitors with names `Random Bot 1` and `Random Bot 2`; student bots are identified by their unique names.
+- Leaderboard sorts by garbage collected descending, then fewer idle ticks (tie breaker). Scores remain after student disconnects and reset for a new round.
+- Each tick resolves movement in rotating priority order to reduce first-player advantage. No two players share a cell. Garbage appears at an empty floor cell once per configured interval when below the cap.
+
+## Start an example student bot
+
+```bash
+python student_bot.py wss://garbage-collectors-aox7.onrender.com/play "My First Bot"
 ```
 
-Each client finds its own entry in `players` by comparing `id` to its `player_id`. The wall layout remains hidden on the server and is never included in WebSocket messages. The full remaining garbage locations are included in every state message. Players cannot walk outside the map, through walls, or onto a tile occupied by another player. Players receive one point per collected garbage tile; removed garbage cannot be collected again. Garbage does not respawn. Disconnecting removes the player from future states; scores are not persistent.
-
-**Error response** (malformed input):
-
-```json
-{"type":"error","message":"Invalid direction"}
-```
-
-## Game loop
-
-At 5 Hz, the server applies up to one pending move per player, performs collision and collection checks, updates scores, renders a terminal map when anything changes, and broadcasts the authoritative state. Clients should draw their screen from server state, not assume a requested move succeeded. To infer a wall, a client can compare its previous position and chosen direction with its position after the tick. A failed move might also mean the map boundary was reached, another player occupied the target cell, or the input was not applied before that tick; check the tick number and visible player positions before marking a cell as a wall.
-
-## Files
-
-- `server.py` — server, map validation, game logic, rendering, WebSocket handling
-- `map.txt` — editable starter map
-- `requirements.txt` — Python dependency
-- `test_client.py` — minimal client for checking connection and movement
-
-
-## Hosting online from an iPad (Render)
-
-Upload the **contents** of the `GarbageCollectors` folder to the root of a GitHub repository.
-Sign in to Render, select **New > Blueprint**, connect that repository and deploy
-using the included `render.yaml`. Alternatively create a Python Web Service with:
-
-- Build command: `pip install -r requirements.txt`
-- Start command: `python server.py --no-display`
-- Instance type: Free
-
-Render sets the `PORT` environment variable, which `server.py` reads automatically.
-The WebSocket URL for remote clients is `wss://YOUR-SERVICE.onrender.com`
-(no `:8765` in the URL). No wall locations are sent to clients.
-Free services may sleep after 15 minutes with no incoming traffic and can restart,
-resetting the in-memory game. Active incoming WebSocket moves normally prevent idle sleep.
-The game currently has no access control; anyone with the address can join.
+Edit `choose_move(state, my_id)` in `student_bot.py` to implement intelligent map exploration and collection. It begins with random movement. Python requires the dependency in `requirements.txt`; students can also implement the same JSON messages in JavaScript or another WebSocket-capable language. The bot's reconnect token is stored in a local file which `.gitignore` excludes from commits. A new round invalidates old tokens and the example bot automatically retries with a fresh identity.
