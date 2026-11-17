@@ -563,7 +563,7 @@ async def main():
             playing.add(ws)
             await ws.send(json.dumps({'type':'welcome','player_id':p.id,'uid':p.uid,
                         'name':p.name,'resume_token':p.token if p.kind=='student' else None,
-                        'width':self.width,'height':self.height,'tick_ms':round(1000/game.tps)}))
+                        'width':game.width,'height':game.height,'tick_ms':round(1000/game.tps)}))
             await sync()
             async for raw in ws:
                 try:
